@@ -477,8 +477,23 @@ class Transformer(nn.Module):
                 ]
             )
 
-    def forward(self, x: torch.Tensor):
-        return self.resblocks(x)
+    def forward(self, x: torch.Tensor, return_hidden=False):
+        if not return_hidden:
+            return self.resblocks(x)
+        
+        hidden_states = []
+        if isinstance(x, list):
+            current_x = x
+            for block in self.resblocks:
+                current_x = block(current_x)
+                hidden_states.append(current_x[0])
+            return current_x, hidden_states
+        else:
+            curr_x = x
+            for block in self.resblocks:
+                curr_x = block(curr_x)
+                hidden_states.append(curr_x)
+            return curr_x, hidden_states
 
 
 class VisionTransformer(nn.Module):
@@ -533,7 +548,7 @@ class VisionTransformer(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, return_hidden=False):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -561,15 +576,28 @@ class VisionTransformer(nn.Module):
         x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
+        if return_hidden:
+            x, hidden_states = self.transformer(x, return_hidden=True)
+        else:
+            x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
-        x = self.ln_post(x[:, 0, :])
+        x_out = self.ln_post(x[:, 0, :])
 
         if self.proj is not None:
-            x = x @ self.proj
+            x_out = x_out @ self.proj
 
-        return x
+        if return_hidden:
+            processed_hidden = []
+            for h in hidden_states:
+                h = h.permute(1, 0, 2)
+                h_post = self.ln_post(h[:, 0, :])
+                if self.proj is not None:
+                    h_post = h_post @ self.proj
+                processed_hidden.append(h_post)
+            return x_out, processed_hidden
+
+        return x_out
 
 
 class VisionTransformer_MaPLe(nn.Module):
@@ -610,7 +638,7 @@ class VisionTransformer_MaPLe(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor, shared_ctx, compound_deeper_prompts):
+    def forward(self, x: torch.Tensor, shared_ctx, compound_deeper_prompts, return_hidden=False):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -639,18 +667,35 @@ class VisionTransformer_MaPLe(nn.Module):
 
         x = x.permute(1, 0, 2)  # NLD -> LND
         # Again combine the inputs, so nn.sequential can work
-        outputs = self.transformer(
-            [x, compound_deeper_prompts, 0]
-        )  # third argument is counter
-        x = outputs[0]
+        if return_hidden:
+            outputs, hidden_states = self.transformer(
+                [x, compound_deeper_prompts, 0], return_hidden=True
+            )
+            x = outputs[0]
+        else:
+            outputs = self.transformer(
+                [x, compound_deeper_prompts, 0]
+            )  # third argument is counter
+            x = outputs[0]
+            
         x = x.permute(1, 0, 2)  # LND -> NLD
 
-        x = self.ln_post(x[:, 0, :])
+        x_out = self.ln_post(x[:, 0, :])
 
         if self.proj is not None:
-            x = x @ self.proj
+            x_out = x_out @ self.proj
 
-        return x
+        if return_hidden:
+            processed_hidden = []
+            for h in hidden_states:
+                h = h.permute(1, 0, 2)
+                h_post = self.ln_post(h[:, 0, :])
+                if self.proj is not None:
+                    h_post = h_post @ self.proj
+                processed_hidden.append(h_post)
+            return x_out, processed_hidden
+
+        return x_out
 
 
 class CLIP(nn.Module):
@@ -779,7 +824,12 @@ class CLIP(nn.Module):
     def dtype(self):
         return self.visual.conv1.weight.dtype
 
-    def encode_image(self, image):
+    def encode_image(self, image, return_hidden=False):
+        if return_hidden:
+            if isinstance(self.visual, (VisionTransformer, VisionTransformer_MaPLe)):
+                return self.visual(image.type(self.dtype), return_hidden=True)
+            else:
+                return self.visual(image.type(self.dtype)), []
         return self.visual(image.type(self.dtype))
 
     def encode_text(self, text):
